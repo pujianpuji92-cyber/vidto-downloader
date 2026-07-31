@@ -4,7 +4,7 @@ import sys
 import time
 import subprocess
 from urllib.parse import urlparse, urljoin
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError
 
 def download_media(media_url, referer=None, output_name=None):
     """Downloads media using yt-dlp."""
@@ -23,7 +23,7 @@ def download_media(media_url, referer=None, output_name=None):
         print(f"\n[-] Error downloading media: {e}", file=sys.stderr)
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract and download media (mp4, m3u8) from a webpage.")
+    parser = argparse.ArgumentParser(description="Extract and download media from a webpage.")
     parser.add_argument("url", help="The URL of the webpage to analyze.")
     parser.add_argument("-o", "--output", help="Optional output filename template (e.g., video.mp4).")
     parser.add_argument("--timeout", type=int, default=30, help="Seconds to wait for a media request (default: 30).")
@@ -35,59 +35,80 @@ def main():
     found_referer = None
 
     print(f"[*] Navigating to {target_url}...")
-    print(f"[*] Waiting up to {args.timeout} seconds for media URLs (.mp4, .m3u8) to appear...")
+    print(f"[*] Waiting up to {args.timeout} seconds for media URLs to appear...")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        # Using a mobile UA avoids many complex anti-bot systems on streaming sites
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+            viewport={"width": 390, "height": 844},
+            is_mobile=True
+        )
         page = context.new_page()
+
+        def is_analytics_url(url):
+            return "google-analytics" in url or "doubleclick" in url or "google" in url or "googletagmanager" in url
 
         def handle_request(request):
             nonlocal found_media_url, found_referer
-            if found_media_url:
-                return # Already found one
+            if found_media_url: return
 
             url = request.url.lower()
-            if ".mp4" in url or ".m3u8" in url:
+            if is_analytics_url(url): return
+
+            # Look for common video extensions or known video host domains
+            if ".mp4" in url or ".m3u8" in url or ("overfetch.video" in url and "http" in url):
                 found_media_url = request.url
                 found_referer = request.headers.get("referer", target_url)
-                print(f"[+] Found media URL: {found_media_url}")
+                print(f"[+] Found media URL via Request: {found_media_url}")
+
+        def handle_response(response):
+            nonlocal found_media_url, found_referer
+            if found_media_url: return
+
+            try:
+                url = response.url.lower()
+                if is_analytics_url(url): return
+
+                content_type = response.headers.get("content-type", "").lower()
+                # Check headers for video if url has no extension
+                if "video/" in content_type or "application/x-mpegurl" in content_type:
+                    found_media_url = response.url
+                    found_referer = response.request.headers.get("referer", target_url)
+                    print(f"[+] Found media URL via Content-Type ({content_type}): {found_media_url}")
+            except Exception:
+                pass
 
         page.on("request", handle_request)
+        page.on("response", handle_response)
 
         try:
-            page.goto(target_url, wait_until="domcontentloaded")
-
-            # 1. First, check if there is an iframe. Some video hosts hide the player inside an iframe.
             try:
-                # Wait briefly to see if an iframe appears
-                iframe_element = page.wait_for_selector("iframe", state="attached", timeout=3000)
-                if iframe_element:
-                    iframe_src = iframe_element.get_attribute("src")
-                    if iframe_src:
-                        full_iframe_url = urljoin(target_url, iframe_src)
-                        print(f"[*] Found iframe, navigating directly to player: {full_iframe_url}")
-                        page.goto(full_iframe_url, wait_until="domcontentloaded")
-            except Exception:
-                # No iframe found within timeout, proceed with current page
-                pass
+                page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+            except TimeoutError:
+                print("[*] Main page load timed out. Continuing...")
 
-            # 2. Wait a bit for the player to initialize
-            page.wait_for_timeout(2000)
-
-            # 3. Try clicking on common video elements
+            # Step 1: Detect iframe and navigate to it explicitly, keeping the same context
+            iframe_element = None
             try:
-                page.click("video", timeout=2000)
+                iframe_element = page.wait_for_selector("iframe", state="attached", timeout=5000)
             except:
                 pass
 
-            try:
-                page.click(".play-button", timeout=2000)
-            except:
-                pass
+            if iframe_element:
+                iframe_src = iframe_element.get_attribute("src")
+                if iframe_src:
+                    full_iframe_url = urljoin(target_url, iframe_src)
+                    print(f"[*] Found iframe, navigating directly to player: {full_iframe_url}")
 
-            # 4. If nothing else works, try clicking the center of the screen multiple times.
-            # This is specifically useful for bypassing popunders that require a click before video plays.
+                    page.set_extra_http_headers({"Referer": target_url})
+                    try:
+                        page.goto(full_iframe_url, wait_until="domcontentloaded", timeout=15000)
+                    except TimeoutError:
+                        print("[*] Iframe load timed out. Continuing...")
+
+            # Step 2: Continuously attempt to click the player
             start_time = time.time()
             click_attempts = 0
 
@@ -95,15 +116,28 @@ def main():
                 if found_media_url:
                     break
 
-                # Attempt to click the center of the viewport every second for the first 5 seconds
-                if click_attempts < 5:
+                if click_attempts < 15:
                     try:
+                        # Click the center of the viewport to bypass overlays
                         page.mouse.click(page.viewport_size['width'] / 2, page.viewport_size['height'] / 2)
+
+                        # Use Javascript to forcefully trigger playback
+                        for frame in page.frames:
+                            try:
+                                frame.evaluate('''() => {
+                                    let v = document.querySelector('video');
+                                    if (v) { v.play().catch(e => {}); v.click(); }
+                                    let p = document.querySelector('.play-button');
+                                    if (p) p.click();
+                                }''')
+                            except:
+                                pass
+
                         click_attempts += 1
                     except:
                         pass
 
-                page.wait_for_timeout(1000)  # Wait 1s and check again
+                page.wait_for_timeout(1000)
 
         except Exception as e:
             print(f"[-] Error navigating to page: {e}")
@@ -113,7 +147,7 @@ def main():
     if found_media_url:
         download_media(found_media_url, found_referer, args.output)
     else:
-        print(f"[-] No media URL (.mp4, .m3u8) was found within {args.timeout} seconds.")
+        print(f"[-] No media URL was found within {args.timeout} seconds.")
 
 if __name__ == "__main__":
     main()
