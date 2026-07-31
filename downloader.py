@@ -127,6 +127,8 @@ def main():
         print("\nKeluar...")
         sys.exit(0)
 
+    output_file = "extracted_urls.txt"
+
     if pilihan == '1':
         url = input("Masukkan URL target: ").strip()
         if not url:
@@ -135,7 +137,10 @@ def main():
 
         result = extract_media_url(url)
         if result:
-            print(f"\n[HASIL] URL Media Berhasil Diekstrak:\n{result}\n")
+            print(f"\n[HASIL] URL Media Berhasil Diekstrak:\n{result}")
+            with open(output_file, 'a') as out_f:
+                out_f.write(f"{url} -> {result}\n")
+            print(f"[*] Hasil telah ditambahkan ke dalam file '{output_file}'\n")
         else:
             print("\n[-] Gagal menemukan URL media.\n")
 
@@ -153,8 +158,6 @@ def main():
             return
 
         print(f"Ditemukan {len(urls)} URL untuk diproses.")
-
-        output_file = "extracted_urls.txt"
         print(f"Hasil ekstraksi akan disimpan ke: {output_file}\n")
 
         with open(output_file, 'a') as out_f:
