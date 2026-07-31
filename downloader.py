@@ -1,41 +1,16 @@
 #!/usr/bin/env python3
-import argparse
 import sys
 import time
-import subprocess
+import os
 from urllib.parse import urlparse, urljoin
 from playwright.sync_api import sync_playwright, TimeoutError
 
-def download_media(media_url, referer=None, output_name=None):
-    """Downloads media using yt-dlp."""
-    print(f"\n[+] Downloading media from: {media_url}")
-
-    cmd = ["yt-dlp", media_url]
-    if referer:
-        cmd.extend(["--add-header", f"Referer:{referer}"])
-    if output_name:
-        cmd.extend(["-o", output_name])
-
-    try:
-        subprocess.run(cmd, check=True)
-        print("\n[+] Download completed successfully!")
-    except subprocess.CalledProcessError as e:
-        print(f"\n[-] Error downloading media: {e}", file=sys.stderr)
-
-def main():
-    parser = argparse.ArgumentParser(description="Extract and download media from a webpage.")
-    parser.add_argument("url", help="The URL of the webpage to analyze.")
-    parser.add_argument("-o", "--output", help="Optional output filename template (e.g., video.mp4).")
-    parser.add_argument("--timeout", type=int, default=30, help="Seconds to wait for a media request (default: 30).")
-
-    args = parser.parse_args()
-
-    target_url = args.url
+def extract_media_url(target_url, timeout=30):
+    """
+    Automates a browser to extract the underlying media URL (.mp4, .m3u8, etc) from a webpage.
+    """
+    print(f"[*] Analyzing: {target_url} (Timeout: {timeout}s)")
     found_media_url = None
-    found_referer = None
-
-    print(f"[*] Navigating to {target_url}...")
-    print(f"[*] Waiting up to {args.timeout} seconds for media URLs to appear...")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -51,20 +26,18 @@ def main():
             return "google-analytics" in url or "doubleclick" in url or "google" in url or "googletagmanager" in url
 
         def handle_request(request):
-            nonlocal found_media_url, found_referer
+            nonlocal found_media_url
             if found_media_url: return
 
             url = request.url.lower()
             if is_analytics_url(url): return
 
-            # Look for common video extensions or known video host domains
             if ".mp4" in url or ".m3u8" in url or ("overfetch.video" in url and "http" in url):
                 found_media_url = request.url
-                found_referer = request.headers.get("referer", target_url)
                 print(f"[+] Found media URL via Request: {found_media_url}")
 
         def handle_response(response):
-            nonlocal found_media_url, found_referer
+            nonlocal found_media_url
             if found_media_url: return
 
             try:
@@ -72,10 +45,8 @@ def main():
                 if is_analytics_url(url): return
 
                 content_type = response.headers.get("content-type", "").lower()
-                # Check headers for video if url has no extension
                 if "video/" in content_type or "application/x-mpegurl" in content_type:
                     found_media_url = response.url
-                    found_referer = response.request.headers.get("referer", target_url)
                     print(f"[+] Found media URL via Content-Type ({content_type}): {found_media_url}")
             except Exception:
                 pass
@@ -87,9 +58,8 @@ def main():
             try:
                 page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
             except TimeoutError:
-                print("[*] Main page load timed out. Continuing...")
+                pass # Continue even if it times out
 
-            # Step 1: Detect iframe and navigate to it explicitly, keeping the same context
             iframe_element = None
             try:
                 iframe_element = page.wait_for_selector("iframe", state="attached", timeout=5000)
@@ -100,28 +70,24 @@ def main():
                 iframe_src = iframe_element.get_attribute("src")
                 if iframe_src:
                     full_iframe_url = urljoin(target_url, iframe_src)
-                    print(f"[*] Found iframe, navigating directly to player: {full_iframe_url}")
 
                     page.set_extra_http_headers({"Referer": target_url})
                     try:
                         page.goto(full_iframe_url, wait_until="domcontentloaded", timeout=15000)
                     except TimeoutError:
-                        print("[*] Iframe load timed out. Continuing...")
+                        pass
 
-            # Step 2: Continuously attempt to click the player
             start_time = time.time()
             click_attempts = 0
 
-            while time.time() - start_time < args.timeout:
+            while time.time() - start_time < timeout:
                 if found_media_url:
                     break
 
                 if click_attempts < 15:
                     try:
-                        # Click the center of the viewport to bypass overlays
                         page.mouse.click(page.viewport_size['width'] / 2, page.viewport_size['height'] / 2)
 
-                        # Use Javascript to forcefully trigger playback
                         for frame in page.frames:
                             try:
                                 frame.evaluate('''() => {
@@ -144,10 +110,71 @@ def main():
         finally:
             browser.close()
 
-    if found_media_url:
-        download_media(found_media_url, found_referer, args.output)
+    return found_media_url
+
+def main():
+    print("========================================")
+    print("       Media URL Extractor Tool         ")
+    print("========================================")
+    print("1. Single URL")
+    print("2. Bulk URL (dari file)")
+    print("0. Keluar")
+    print("========================================")
+
+    try:
+        pilihan = input("Pilih menu (0-2): ").strip()
+    except KeyboardInterrupt:
+        print("\nKeluar...")
+        sys.exit(0)
+
+    if pilihan == '1':
+        url = input("Masukkan URL target: ").strip()
+        if not url:
+            print("URL tidak valid.")
+            return
+
+        result = extract_media_url(url)
+        if result:
+            print(f"\n[HASIL] URL Media Berhasil Diekstrak:\n{result}\n")
+        else:
+            print("\n[-] Gagal menemukan URL media.\n")
+
+    elif pilihan == '2':
+        filepath = input("Masukkan path ke file teks (contoh: list_url.txt): ").strip()
+        if not os.path.exists(filepath):
+            print(f"File '{filepath}' tidak ditemukan.")
+            return
+
+        with open(filepath, 'r') as f:
+            urls = [line.strip() for line in f if line.strip()]
+
+        if not urls:
+            print("File kosong atau tidak berisi URL yang valid.")
+            return
+
+        print(f"Ditemukan {len(urls)} URL untuk diproses.")
+
+        output_file = "extracted_urls.txt"
+        print(f"Hasil ekstraksi akan disimpan ke: {output_file}\n")
+
+        with open(output_file, 'a') as out_f:
+            for i, url in enumerate(urls, 1):
+                print(f"\n--- Memproses URL {i}/{len(urls)} ---")
+                result = extract_media_url(url)
+                if result:
+                    out_f.write(f"{url} -> {result}\n")
+                    print(f"[HASIL] {result}")
+                else:
+                    out_f.write(f"{url} -> GAGAL\n")
+                    print("[-] Gagal")
+
+        print(f"\nProses selesai. Hasil tersimpan di '{output_file}'\n")
+
+    elif pilihan == '0':
+        print("Keluar...")
+        sys.exit(0)
     else:
-        print(f"[-] No media URL was found within {args.timeout} seconds.")
+        print("Pilihan tidak valid.")
 
 if __name__ == "__main__":
     main()
