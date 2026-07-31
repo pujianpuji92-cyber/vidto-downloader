@@ -137,12 +137,14 @@ def main():
 
         result = extract_media_url(url)
         if result:
-            print(f"\n[HASIL] URL Media Berhasil Diekstrak:\n{result}")
+            print(f"\n[HASIL] {result}")
             with open(output_file, 'a') as out_f:
-                out_f.write(f"{url} -> {result}\n")
+                out_f.write(f"{result}\n")
             print(f"[*] Hasil telah ditambahkan ke dalam file '{output_file}'\n")
         else:
-            print("\n[-] Gagal menemukan URL media.\n")
+            print(f"\n[-] {url} -> GAGAL\n")
+            with open(output_file, 'a') as out_f:
+                out_f.write(f"{url} -> GAGAL\n")
 
     elif pilihan == '2':
         filepath = input("Masukkan path ke file teks (contoh: list_url.txt): ").strip()
@@ -165,11 +167,11 @@ def main():
                 print(f"\n--- Memproses URL {i}/{len(urls)} ---")
                 result = extract_media_url(url)
                 if result:
-                    out_f.write(f"{url} -> {result}\n")
+                    out_f.write(f"{result}\n")
                     print(f"[HASIL] {result}")
                 else:
                     out_f.write(f"{url} -> GAGAL\n")
-                    print("[-] Gagal")
+                    print(f"[-] {url} -> GAGAL")
 
         print(f"\nProses selesai. Hasil tersimpan di '{output_file}'\n")
 
